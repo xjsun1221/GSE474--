@@ -1,11 +1,22 @@
+#1.getdata----
 rm(list = ls())
 options(stringsAsFactors = F)
 library(GEOquery)
 library(stringr)
+library(AnnoProbe)
 gse = "GSE5109"
-eSet <- getGEO("GSE5109", 
-               destdir = '.', 
-               getGPL = F)
+
+if(T){
+  if(!file.exists(paste0(gse,"_eSet.Rdata"))) geoChina("GSE5109")
+  load("GSE5109_eSet.Rdata")
+  eSet <- gset
+}else{
+  eSet <- getGEO("GSE5109", 
+                 destdir = '.', 
+                 getGPL = F)
+}
+
+
 #(1)提取表达矩阵exp
 exp <- exprs(eSet[[1]])
 exp[1:4,1:4]
@@ -15,17 +26,14 @@ pd <- pData(eSet[[1]])
 #(3)提取芯片平台编号
 gpl <- eSet[[1]]@annotation
 
-
-identical(rownames(pd),colnames(exp))
-
-pd = pd[match(colnames(exp),rownames(pd)),]
-
+p = identical(rownames(pd),colnames(exp));p
+if(!p) exp = exp[,match(rownames(pd),colnames(exp))]
+#2.group----
 group_list = ifelse(str_detect(pd$title,"Pre"),"pre","post")
 group_list=factor(group_list,levels = c("pre","post"),ordered = T)
 pairinfo = factor(c(1,2,1,3,2,3))
-exp = log2(exp+1)
 
-#PCA
+#3.PCA----
 {
   dat=as.data.frame(t(exp))
   library(FactoMineR)#画主成分分析图需要加载这两个包
@@ -39,13 +47,13 @@ exp = log2(exp+1)
                addEllipses = TRUE, # Concentration ellipses
                legend.title = "Groups"
   )
-  ggsave(paste0(gse,"PCA.png"))
 }
+ggsave(paste0(gse,"PCA.png"))
 
 exp[1:4,1:4]
 boxplot(exp[1,]~group_list) 
 
-#差异分析，用limma包来做
+#4.差异分析----
 #需要表达矩阵和group_list，其他都不要动
 {
   library(limma)
@@ -65,26 +73,38 @@ boxplot(exp[1,]~group_list)
   head(deg)
 }
 
-
 #2.加symbol列，火山图要用
-#id转换，查找芯片平台对应的包
+#5.芯片注释----
 eSet[[1]]@annotation
 #http://www.bio-info-trainee.com/1399.html
 #hgu133plus2
-if(!require(hgu133plus2.db))BiocManager::install("hgu133plus2.db")
-library(hgu133plus2.db)
-ls("package:hgu133plus2.db")
-ids <- toTable(hgu133plus2SYMBOL)
-head(ids)
+if(F){
+  if(!require(hgu133plus2.db))BiocManager::install("hgu133plus2.db")
+  library(hgu133plus2.db)
+  ls("package:hgu133plus2.db")
+  ids <- toTable(hgu133plus2SYMBOL)
+  head(ids)
+}
+
+if(F){
+  getGEO("GPL570")
+  ids = data.table::fread("GPL570.soft",header = T,skip = "ID",data.table = F)
+  ids = ids[c("ID","Gene Symbol"),]
+  colnames(ids) = c("probe_id")
+}
+
+if(T){
+  ids = idmap(gpl,type = "bioc")
+}
+#6.加列----
 {
-  
   #merge
   deg <- inner_join(deg,ids,by="probe_id")
   deg <- deg[!duplicated(deg$symbol),]
   head(deg)
   #3.加change列：上调或下调，火山图要用
-  
-  logFC_t=0 #不同的阈值，筛选到的差异基因数量就不一样，后面的超几何分布检验结果就大相径庭。
+  mean(deg$logFC)+2*sd(deg$logFC)
+  logFC_t=2 #不同的阈值，筛选到的差异基因数量就不一样，后面的超几何分布检验结果就大相径庭。
   change=ifelse(deg$P.Value>0.05,'stable', 
                 ifelse( deg$logFC >logFC_t,'up', 
                         ifelse( deg$logFC < -logFC_t,'down','stable') )
@@ -111,9 +131,9 @@ head(ids)
   dat <- mutate(deg,v=-log10(P.Value))
   head(dat)
 }
-
+#7.火山图----
 {
-  p <- ggplot(data = deg, 
+  p <- ggplot(data = dat, 
               aes(x = logFC, 
                   y = v)) +
     geom_point(alpha=0.4, size=3.5, 
@@ -123,8 +143,7 @@ head(ids)
     geom_vline(xintercept=c(-logFC_t,logFC_t),lty=4,col="black",lwd=0.8) +
     geom_hline(yintercept = -log10(0.05),lty=4,col="black",lwd=0.8) +
     theme_bw()
-  for_label <- deg %>% 
-    filter(abs(logFC) >0.7& P.Value< 0.05)
+  for_label <- head(deg,10) 
   p +
     geom_point(size = 3, shape = 1, data = for_label) +
     ggrepel::geom_label_repel(
@@ -132,10 +151,9 @@ head(ids)
       data = for_label,
       color="black"
     )
-  ggsave(paste0(gse,"volcano.png"))
 }
-
-
+ggsave(paste0(gse,"volcano.png"))
+#8.热图----
 x=deg$logFC 
 names(x)=deg$probe_id 
 cg=c(names(head(sort(x),30)),
@@ -171,70 +189,45 @@ pheatmap(n,show_colnames =F,
          gaps_col = c(2,4)) 
 dev.off()
 
-# 配对样本的箱线图
-
+#9. 配对样本的箱线图----
 exp2 = exp[match(deg$probe_id,rownames(exp)),]
-dim(exp2)
 rownames(exp2) = deg$symbol
 dat <- data.frame(pairinfo=pairinfo,group=group_list,t(exp2))
+#配对样本箱线图批量绘制,画10张玩玩
+
 library(ggplot2)
-colnames(dat)[3]
-ggplot(dat, aes(group,STK26,fill=group)) +
-  geom_boxplot() +
-  geom_point(size=2, alpha=0.5) +
-  geom_line(aes(group=pairinfo), colour="black", linetype="11") +
-  xlab("") +
-  ylab(paste("Expression of",colnames(dat)[3]))+
-  theme_classic()+
-  theme(legend.position = "none")
-ggsave(paste0(colnames(dat)[3],"box.png"))
-### 文章报道的基因
-c("GRB14","GPD1","GDF8") %in% rownames(exp2)
+x = colnames(dat)[3:12]
+pl = list()
+for(i in 1:length(x)){
+  pl[[i]] = ggplot(dat, aes_string("group",colnames(dat)[i+2],fill="group")) +
+    geom_boxplot() +
+    geom_point(size=2, alpha=0.5) +
+    geom_line(aes(group=pairinfo), colour="black", linetype="11") +
+    xlab("") +
+    ylab(paste("Expression of",colnames(dat)[i+2]))+
+    theme_classic()+
+    theme(legend.position = "none")
+}
+#拼图
+library(patchwork)
+pb_top10= wrap_plots(pl,nrow = 2)+plot_annotation(tag_levels = 'A')
+ggsave(plot = pb_top10,filename = paste0("box.png"),width = 15,height = 6)
 
-pn2 = exp2[c("GRB14","GPD1"),]
 
-ggplot(dat, aes(group,GRB14,fill=group)) +
-  geom_boxplot() +
-  geom_point(size=2, alpha=0.5) +
-  geom_line(aes(group=pairinfo), colour="black", linetype="11") +
-  xlab("") +
-  ylab(paste("Expression of","GRB14"))+
-  theme_classic()+
-  theme(legend.position = "none")
-ggsave(paste0("GRB14","box.png"))
-
-ggplot(dat, aes(group,GPD1,fill=group)) +
-  geom_boxplot() +
-  geom_point(size=2, alpha=0.5) +
-  geom_line(aes(group=pairinfo), colour="black", linetype="11") +
-  xlab("") +
-  ylab(paste("Expression of","GPD1"))+
-  theme_classic()+
-  theme(legend.position = "none")
-ggsave(paste0("GPD1","box.png"))
-
-# 差异基因表格
-test = deg[deg$P.Value<0.05,]
-nrow(test)
-range(test$logFC)
-table(test$change)
-genes = deg$symbol[deg$change != "stable"]
-
+#10.配对样本的差异基因热图----
 #用arrange间接实现了配对画图，pre在前，post在后
-library(pheatmap)
 test = data.frame(gsm = colnames(exp),group_list,pairinfo)
 test
-
 library(dplyr)
 col = (arrange(test,pairinfo,group_list))$gsm
 od = match(col,colnames(exp))
-
+genes = deg$symbol[deg$change != "stable"]
 n=exp2[genes,od]
-
+library(pheatmap)
 annotation_col=data.frame(group= as.character(group_list)[od],
                           pair = as.character(pairinfo)[od])
 rownames(annotation_col)=colnames(n) 
-png("26genes.png")
+png("deg_genes.png")
 pheatmap(n,show_colnames =F,
          #show_rownames = F,
          scale = "row",
@@ -243,30 +236,5 @@ pheatmap(n,show_colnames =F,
          gaps_col = c(2,4)) 
 dev.off()
 
-c("GRB14","GPD1","GDF8") %in% rownames(n)
-cgs = rownames(n)
-save(cgs,file = "cgs.Rdata")
 
 
-#用arrange间接实现了配对画图，pre在前，post在后
-library(pheatmap)
-test = data.frame(gsm = colnames(exp),group_list,pairinfo)
-test
-
-library(dplyr)
-col = (arrange(test,pairinfo,group_list))$gsm
-od = match(col,colnames(exp))
-load("cgin.Rdata")
-n=exp2[cgin,od]
-
-annotation_col=data.frame(group= as.character(group_list)[od],
-                          pair = as.character(pairinfo)[od])
-rownames(annotation_col)=colnames(n) 
-png("474genes.png")
-pheatmap(n,show_colnames =F,
-         show_rownames = F,
-         scale = "row",
-         cluster_cols = F, 
-         annotation_col=annotation_col,
-         gaps_col = c(2,4)) 
-dev.off()

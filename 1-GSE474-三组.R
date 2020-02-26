@@ -71,6 +71,7 @@ for(i in 1:length(cp)){
   print(deg[[i]][1,1])
   boxplot(exps[rownames(deg[[i]])[1],]~grps)
 }
+
 #2.加symbol列，火山图要用
 #id转换，查找芯片平台对应的包
 anno
